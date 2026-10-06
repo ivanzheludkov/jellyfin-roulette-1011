@@ -1,6 +1,6 @@
 /**
  * Jellyfin Playlist Modal Plugin - Client Side Script
- * Version 1.0.2 - Dynamic web client injection path resolution
+ * Version 1.1.0 - Jellyfin 10.11 support (all playlist item types, hash routing)
  *
  * This script intercepts playlist clicks and shows an animated modal with two options:
  * 1. Surprise Me - Slot machine animation revealing a random unwatched item
@@ -10,7 +10,7 @@
 (function() {
     'use strict';
 
-    console.log('[Roulette] Plugin loaded (v1.0.2)');
+    console.log('[Roulette] Plugin loaded (v1.1.0)');
 
 	// Animation configuration (overridden by server-provided RouletteConfig if present)
 	const config = {
@@ -50,7 +50,7 @@
 		close: injectedCfg && injectedCfg.CloseText ? injectedCfg.CloseText : 'Close'
 	};
 
-	const clientVersion = '1.0.2';
+	const clientVersion = '1.1.0';
 
     // State
     let currentModal = null;
@@ -69,6 +69,11 @@
 
         // Intercept playlist navigation clicks
         document.addEventListener('click', function(e) {
+            // Leave the card's context menu and multi-select controls alone
+            if (e.target.closest('[data-action="menu"], [data-action="multiselect"], .chkItemSelect, .itemSelectionPanel')) {
+                return;
+            }
+
             let target = null;
             let playlistId = null;
 
@@ -625,24 +630,36 @@
         const ApiClient = window.ApiClient;
         const userId = ApiClient.getCurrentUserId();
 
-        const url = ApiClient.getUrl(`Users/${userId}/Items`, {
-            ParentId: playlistId,
-            Fields: 'PrimaryImageAspectRatio,ImageTags',
-            Recursive: true,
-            IncludeItemTypes: 'Movie'
+        // Playlists/{id}/Items returns every playable entry (movies, episodes, videos, audio)
+        // and expands series/seasons/folders added to the playlist. Filtering by
+        // IncludeItemTypes=Movie made non-movie playlists look empty.
+        const url = ApiClient.getUrl(`Playlists/${playlistId}/Items`, {
+            UserId: userId,
+            Fields: 'PrimaryImageAspectRatio',
+            EnableImageTypes: 'Primary',
+            ImageTypeLimit: 1,
+            EnableUserData: true
         });
 
         const response = await ApiClient.getJSON(url);
         const items = response.Items || [];
 
-        // Add image URLs
+        const imageUrl = (id, tag) => ApiClient.getUrl(`Items/${id}/Images/Primary`, {
+            maxWidth: 600,
+            quality: 90,
+            tag: tag
+        });
+
         items.forEach(item => {
-            if (item.ImageTags && item.ImageTags.Primary) {
-                item.imageUrl = ApiClient.getUrl(`Items/${item.Id}/Images/Primary`, {
-                    maxWidth: 600,
-                    quality: 90,
-                    tag: item.ImageTags.Primary
-                });
+            item.displayName = getDisplayName(item);
+
+            // Prefer portrait artwork: series poster for episodes, album cover for tracks
+            if (item.Type === 'Episode' && item.SeriesId && item.SeriesPrimaryImageTag) {
+                item.imageUrl = imageUrl(item.SeriesId, item.SeriesPrimaryImageTag);
+            } else if (item.ImageTags && item.ImageTags.Primary) {
+                item.imageUrl = imageUrl(item.Id, item.ImageTags.Primary);
+            } else if (item.AlbumId && item.AlbumPrimaryImageTag) {
+                item.imageUrl = imageUrl(item.AlbumId, item.AlbumPrimaryImageTag);
             } else {
                 // Fallback placeholder
                 item.imageUrl = 'data:image/svg+xml,' + encodeURIComponent(
@@ -762,7 +779,7 @@
             pendingIndex = idx;
 
             hiddenImg.src = item.imageUrl;
-            hiddenImg.alt = item.Name;
+            hiddenImg.alt = item.displayName || item.Name;
 
             requestAnimationFrame(() => {
                 activeImg.classList.remove('active');
@@ -840,7 +857,7 @@
         // Set winner image
         const activeImg = imgA.classList.contains('active') ? imgA : imgB;
         activeImg.src = winner.imageUrl;
-        activeImg.alt = winner.Name;
+        activeImg.alt = winner.displayName || winner.Name;
 
         // Reset blur and vignette
         stage.style.setProperty('--blur', '0px');
@@ -857,7 +874,7 @@
         flash.classList.add('pop');
 
         // Show heading
-        heading.textContent = winner.Name;
+        heading.textContent = winner.displayName || winner.Name;
         heading.classList.add('show');
 
         // Final tick sound
@@ -896,23 +913,46 @@
         });
 
 		// Move focus to the new primary action
+		// (the modal-level keydown handler stays registered and re-queries focusables on each key press)
 		requestAnimationFrame(() => {
 			try { watchBtn && watchBtn.focus({ preventScroll: true }); } catch (_) { /* no-op */ }
 		});
-
-		// Ensure tab trapping continues after controls update
-		document.addEventListener('keydown', handleKeydown, true);
     }
 
     /**
      * Navigate to item details page
      */
     function navigateToItem(itemId) {
+        console.log('[Roulette] Navigating to item:', itemId);
+        navigateToDetails(itemId);
+    }
+
+    /**
+     * Open an item's details page through the web client's hash router.
+     * Jellyfin 10.10+ routes are "#/details?..." - the legacy "/web/index.html#!/..."
+     * form forces a full page reload and is deprecated (BangRedirect).
+     */
+    function navigateToDetails(itemId) {
         const ApiClient = window.ApiClient;
         const serverId = ApiClient.serverId ? ApiClient.serverId() : ApiClient.serverInfo().Id;
-        const detailsUrl = '/web/index.html#!/details?id=' + itemId + '&serverId=' + serverId;
-        console.log('[Roulette] Navigating to item:', itemId);
-        window.location.href = detailsUrl;
+        window.location.hash = '#/details?id=' + encodeURIComponent(itemId) + '&serverId=' + encodeURIComponent(serverId);
+    }
+
+    /**
+     * Human readable title: "Series - S01E02 - Episode" for episodes, "Artist - Track" for audio
+     */
+    function getDisplayName(item) {
+        if (item.Type === 'Episode' && item.SeriesName) {
+            const pad = (n) => String(n).padStart(2, '0');
+            const code = Number.isFinite(item.ParentIndexNumber) && Number.isFinite(item.IndexNumber)
+                ? `S${pad(item.ParentIndexNumber)}E${pad(item.IndexNumber)} · `
+                : '';
+            return `${item.SeriesName} — ${code}${item.Name}`;
+        }
+        if (item.Type === 'Audio' && item.AlbumArtist) {
+            return `${item.AlbumArtist} — ${item.Name}`;
+        }
+        return item.Name;
     }
 
     /**
@@ -970,10 +1010,7 @@
         console.log('[Roulette] Show List selected');
         closeModal();
         // Navigate to playlist details page (same as navigateToItem)
-        const ApiClient = window.ApiClient;
-        const serverId = ApiClient.serverId ? ApiClient.serverId() : ApiClient.serverInfo().Id;
-        const playlistUrl = '/web/index.html#!/details?id=' + playlistId + '&serverId=' + serverId;
-        window.location.href = playlistUrl;
+        navigateToDetails(playlistId);
     }
 
     // Initialize when DOM is ready

@@ -20,6 +20,11 @@ namespace Jellyfin.Plugin.Roulette;
 public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 {
     private const string ScriptMarker = "<!-- Roulette Plugin Script -->";
+    private const string ScriptEndMarker = "<!-- /Roulette Plugin Script -->";
+    private const string ScriptCloseTag = "</script>";
+    private const string BodyCloseTag = "</body>";
+
+    private static readonly object _injectionLock = new();
 
     private static readonly string[] PossibleWebPaths = new[]
     {
@@ -52,14 +57,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         _logger = logger;
 
         // Inject JavaScript on plugin load
-        try
-        {
-            InjectJavaScript();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[Roulette][ERROR] Failed to inject JavaScript into web client");
-        }
+        TryInjectJavaScript();
     }
 
     /// <inheritdoc />
@@ -73,8 +71,108 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     /// </summary>
     public static Plugin? Instance { get; private set; }
 
+    /// <inheritdoc />
+    public override void UpdateConfiguration(BasePluginConfiguration configuration)
+    {
+        base.UpdateConfiguration(configuration);
+
+        // The client reads its settings from the injected window.RouletteConfig, so refresh the block.
+        TryInjectJavaScript();
+    }
+
+    /// <inheritdoc />
+    public override void OnUninstalling()
+    {
+        try
+        {
+            var webClientPath = ResolveWebClientIndexPath();
+            if (webClientPath != null)
+            {
+                lock (_injectionLock)
+                {
+                    var indexHtml = File.ReadAllText(webClientPath);
+                    var cleanHtml = RemoveInjectedBlock(indexHtml);
+                    if (!string.Equals(cleanHtml, indexHtml, StringComparison.Ordinal))
+                    {
+                        File.WriteAllText(webClientPath, cleanHtml);
+                        _logger.LogInformation("[Roulette][INFO] Removed injected JavaScript from: {Path}", webClientPath);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[Roulette][ERROR] Failed to remove injected JavaScript from web client");
+        }
+
+        base.OnUninstalling();
+    }
+
     /// <summary>
-    /// Injects the JavaScript code into the Jellyfin web client.
+    /// Removes a previously injected Roulette block (current or 1.0.x format) from index.html content.
+    /// </summary>
+    /// <param name="html">The index.html content.</param>
+    /// <returns>The content without the Roulette block; unchanged if no block is present.</returns>
+    internal static string RemoveInjectedBlock(string html)
+    {
+        var start = html.IndexOf(ScriptMarker, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return html;
+        }
+
+        int end;
+        var endMarker = html.IndexOf(ScriptEndMarker, start, StringComparison.Ordinal);
+        if (endMarker >= 0)
+        {
+            end = endMarker + ScriptEndMarker.Length;
+        }
+        else
+        {
+            // Blocks written by 1.0.x have no end marker: marker, config <script>, code <script>.
+            end = start;
+            for (var i = 0; i < 2; i++)
+            {
+                var close = html.IndexOf(ScriptCloseTag, end, StringComparison.OrdinalIgnoreCase);
+                if (close < 0)
+                {
+                    return html;
+                }
+
+                end = close + ScriptCloseTag.Length;
+            }
+        }
+
+        while (start > 0 && char.IsWhiteSpace(html[start - 1]))
+        {
+            start--;
+        }
+
+        while (end < html.Length && char.IsWhiteSpace(html[end]))
+        {
+            end++;
+        }
+
+        return string.Concat(html.AsSpan(0, start), "\n", html.AsSpan(end));
+    }
+
+    private void TryInjectJavaScript()
+    {
+        try
+        {
+            lock (_injectionLock)
+            {
+                InjectJavaScript();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[Roulette][ERROR] Failed to inject JavaScript into web client");
+        }
+    }
+
+    /// <summary>
+    /// Injects the JavaScript code into the Jellyfin web client, replacing any older Roulette block.
     /// </summary>
     private void InjectJavaScript()
     {
@@ -92,15 +190,9 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
             return;
         }
 
-        // Read the current index.html content
+        // Read the current index.html content and drop any block injected by this or an older version
         var indexHtml = File.ReadAllText(webClientPath);
-
-        // Check if script is already injected
-        if (indexHtml.Contains(ScriptMarker, StringComparison.Ordinal))
-        {
-            _logger.LogInformation("[Roulette][INFO] JavaScript already injected, skipping");
-            return;
-        }
+        var cleanHtml = RemoveInjectedBlock(indexHtml);
 
         // Read the JavaScript file from embedded resource
         var assembly = Assembly.GetExecutingAssembly();
@@ -141,17 +233,29 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         };
         var cfgJson = JsonSerializer.Serialize(cfg);
 
-        // Create the script tag to inject: config object first, then script
-        var scriptTag = $@"
-    {ScriptMarker}
-    <script type=""text/javascript"">window.RouletteConfig = {cfgJson};</script>
-    <script type=""text/javascript"">
+        // Create the script block to inject: config object first, then script
+        var scriptTag = $@"{ScriptMarker}
+<script type=""text/javascript"">window.RouletteConfig = {cfgJson};</script>
+<script type=""text/javascript"">
 {jsContent}
-    </script>
+</script>
+{ScriptEndMarker}
 ";
 
         // Inject before the closing </body> tag
-        var modifiedHtml = indexHtml.Replace("</body>", $"{scriptTag}\n</body>", StringComparison.Ordinal);
+        var bodyIndex = cleanHtml.LastIndexOf(BodyCloseTag, StringComparison.OrdinalIgnoreCase);
+        if (bodyIndex < 0)
+        {
+            _logger.LogWarning("[Roulette][WARN] No </body> tag found in {Path}; JavaScript injection skipped.", webClientPath);
+            return;
+        }
+
+        var modifiedHtml = cleanHtml.Insert(bodyIndex, scriptTag);
+        if (string.Equals(modifiedHtml, indexHtml, StringComparison.Ordinal))
+        {
+            _logger.LogInformation("[Roulette][INFO] Injected JavaScript is already up to date");
+            return;
+        }
 
         // Write the modified content back
         try

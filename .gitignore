@@ -49,3 +49,7 @@ Desktop.ini
 scratchpad.md
 phase3-plan.md
 .cursor/
+
+# E2E screenshots / local venv
+e2e-shots/
+.venv/

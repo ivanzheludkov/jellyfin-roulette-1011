@@ -5,6 +5,24 @@ All notable changes to Jellyfin-Roulette will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-10-06
+
+Jellyfin 10.11 port, maintained at https://github.com/ivanzheludkov/jellyfin-roulette-1011.
+
+### Fixed
+
+- "Surprise Me" reported *"This playlist is empty!"* for playlists with episodes, series, home videos or music: the client queried `Users/{id}/Items?ParentId=…&IncludeItemTypes=Movie`, so every non-movie entry was dropped. It now reads `Playlists/{id}/Items`, which returns every playable entry (series added to a playlist are expanded to episodes).
+- Server endpoint `GET /Roulette/Random/{playlistId}` failed on 10.11 with `MissingMethodException` (plugin was compiled against 10.9). It is rebuilt for 10.11, returns any playable item type, applies the same access rules as `/Playlists/{id}/Items`, and defaults `userId` to the authenticated user (administrators may pass another user).
+- "Play it!" / "Show List" used the deprecated `/web/index.html#!/details` URL, which forced a full page reload and logs a `BangRedirect` deprecation warning on 10.11. Navigation now uses the `#/details` hash route.
+- `ReferenceError: handleKeydown is not defined` after every spin.
+- Upgrading never replaced the script injected by 1.0.x (injection stopped at the marker). The injected block is now replaced on every start, refreshed when the configuration is saved, and removed when the plugin is uninstalled.
+- Clicks on a playlist card's context-menu ("⋮") and selection controls are no longer hijacked by the modal.
+
+### Changed
+
+- Target .NET 9 and Jellyfin 10.11.11 packages (`targetAbi` 10.11.0.0).
+- Episodes show as "Series — S01E02 · Title" with the series poster during the spin.
+
 ## [1.0.1] - 2025-10-23
 
 ### Fixed
@@ -105,6 +123,6 @@ Public announcement and first stable release after community testing.
 
 ---
 
-**Current Version**: v1.0.1
-**Status**: Namespace Hotfix
-**Repository**: https://github.com/ztffn/Jellyfin-Roulette
+**Current Version**: v1.1.0
+**Status**: Jellyfin 10.11 port
+**Repository**: https://github.com/ivanzheludkov/jellyfin-roulette-1011 (fork of https://github.com/ztffn/Jellyfin-Roulette)

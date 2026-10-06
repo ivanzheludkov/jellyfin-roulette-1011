@@ -1,16 +1,19 @@
 ---
-name: "Template"
-guid: "eb5d7894-8eef-4b36-aa6f-5d124e828ce1"
-version: "1.0.1.0"
-targetAbi: "10.9.0.0"
-framework: "net8.0"
-overview: "Short description about your plugin"
+name: "Roulette"
+guid: "a1b2c3d4-5e6f-7a8b-9c0d-1e2f3a4b5c6d"
+version: "1.1.0.0"
+targetAbi: "10.11.0.0"
+framework: "net9.0"
+overview: "Play a random unwatched item from a playlist with a slot machine animation"
 description: >
-  This is a longer description that can span more than one
-  line and include details about your plugin.
+  Intercepts playlist clicks in the Jellyfin web client and shows a modal with
+  "Surprise Me" (slot machine animation that picks a random unwatched item) and
+  "Show List" options. Works with movies, episodes, videos and music in playlists.
 category: "General"
-owner: "jellyfin"
+owner: "ivanzheludkov"
 artifacts:
-- "Jellyfin.Plugin.Template.dll"
+- "Jellyfin.Plugin.Roulette.dll"
 changelog: >
-  changelog
+  Jellyfin 10.11 support: rebuilt for .NET 9 / Jellyfin 10.11.11, playlists with
+  episodes, series and other non-movie items no longer appear empty, navigation
+  uses the current hash routes, injected script is refreshed on upgrade.

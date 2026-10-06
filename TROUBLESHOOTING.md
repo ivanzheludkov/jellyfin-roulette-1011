@@ -3,8 +3,8 @@
 Having trouble getting the Roulette modal to appear? Work through the checks below and gather the requested info before opening an issue—most problems can be fixed with a few quick steps.
 
 ## 1. Verify Your Versions
-- **Roulette**: Installed version should be `1.0.2` (Plugins → Installed).
-- **Jellyfin**: Supported on 10.8+, tested on 10.10.x and 10.11.
+- **Roulette**: Installed version should be `1.1.0` (Plugins → Installed).
+- **Jellyfin**: 10.11.x (tested on 10.11.11).
 - After installing or updating, **restart Jellyfin** and perform a **hard browser refresh** (`Ctrl+Shift+R` / `Cmd+Shift+R`).
 
 ## 2. Watch the Server Log
@@ -26,7 +26,7 @@ If you see warnings or errors instead, the server could not locate or modify the
 ## 3. Check the Browser Console
 Open Jellyfin in your browser, press `F12`, switch to the **Console**, and click any playlist. If the client script is active you will see:
 ```
-[Roulette] Plugin loaded (v1.0.2)
+[Roulette] Plugin loaded (v1.1.0)
 [Roulette] Initializing...
 ```
 and subsequent intercept logs. No console output means the script never injected; re-check the server log.
@@ -34,9 +34,9 @@ and subsequent intercept logs. No console output means the script never injected
 ## 4. Confirm Your Plugin Repository
 Ensure the repository URL is set to the official manifest:
 ```
-https://raw.githubusercontent.com/ztffn/Jellyfin-Roulette/main/manifest.json
+https://raw.githubusercontent.com/ivanzheludkov/jellyfin-roulette-1011/main/manifest.json
 ```
-Remove any experimental/stale entries, reinstall Roulette, and delete old copies under `plugins/Jellyfin-Roulette_*` before restarting.
+Remove any experimental/stale entries, reinstall Roulette, and delete old copies under `plugins/Jellyfin-Roulette_*` / `plugins/Roulette_*` before restarting.
 
 ## Fixing “Permission denied”
 If the log shows:
@@ -77,4 +77,4 @@ Collect the following and open a GitHub issue:
 - Browser console output (if any)
 - Details about your install (Docker compose snippet, service account, etc.)
 
-With that info open up a new [issue](https://github.com/ztffn/Jellyfin-Roulette/issues) and I'll try to help you.
+With that info open up a new [issue](https://github.com/ivanzheludkov/jellyfin-roulette-1011/issues) and I'll try to help you.

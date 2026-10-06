@@ -1,12 +1,10 @@
 using System;
+using System.Globalization;
 using System.Linq;
-using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Dto;
-using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Playlists;
 using MediaBrowser.Model.Dto;
-using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -22,7 +20,11 @@ namespace Jellyfin.Plugin.Roulette.Api;
 [Route("Roulette")]
 public class RouletteController : ControllerBase
 {
-    private readonly ILibraryManager _libraryManager;
+    // Claim names used by Jellyfin's authentication handler (Jellyfin.Api.Constants.InternalClaimTypes).
+    private const string UserIdClaim = "Jellyfin-UserId";
+    private const string AdministratorRole = "Administrator";
+
+    private readonly IPlaylistManager _playlistManager;
     private readonly IUserManager _userManager;
     private readonly IDtoService _dtoService;
     private readonly ILogger<RouletteController> _logger;
@@ -30,17 +32,17 @@ public class RouletteController : ControllerBase
     /// <summary>
     /// Initializes a new instance of the <see cref="RouletteController"/> class.
     /// </summary>
-    /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
+    /// <param name="playlistManager">Instance of the <see cref="IPlaylistManager"/> interface.</param>
     /// <param name="userManager">Instance of the <see cref="IUserManager"/> interface.</param>
     /// <param name="dtoService">Instance of the <see cref="IDtoService"/> interface.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{RouletteController}"/> interface.</param>
     public RouletteController(
-        ILibraryManager libraryManager,
+        IPlaylistManager playlistManager,
         IUserManager userManager,
         IDtoService dtoService,
         ILogger<RouletteController> logger)
     {
-        _libraryManager = libraryManager;
+        _playlistManager = playlistManager;
         _userManager = userManager;
         _dtoService = dtoService;
         _logger = logger;
@@ -50,66 +52,79 @@ public class RouletteController : ControllerBase
     /// Gets a random unwatched item from a playlist.
     /// </summary>
     /// <param name="playlistId">The playlist ID.</param>
-    /// <param name="userId">The user ID.</param>
-    /// <returns>A random unwatched item from the playlist.</returns>
+    /// <param name="userId">Optional user ID. Defaults to the authenticated user; only administrators may pass another user.</param>
+    /// <returns>A random unwatched playable item from the playlist.</returns>
     [HttpGet("Random/{playlistId}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult<BaseItemDto> GetRandomUnwatchedItem(
         [FromRoute] Guid playlistId,
-        [FromQuery] Guid userId)
+        [FromQuery] Guid? userId)
     {
-        _logger.LogInformation("GetRandomUnwatchedItem called for playlist: {PlaylistId}, user: {UserId}", playlistId, userId);
+        var callerId = GetCallerUserId();
+        var effectiveUserId = userId is { } requested && requested != Guid.Empty ? requested : callerId;
 
-        // Validate user
-        var user = _userManager.GetUserById(userId);
-        if (user == null)
+        if (effectiveUserId == Guid.Empty)
         {
-            _logger.LogWarning("User not found: {UserId}", userId);
+            return BadRequest("User ID could not be determined");
+        }
+
+        if (effectiveUserId != callerId && !User.IsInRole(AdministratorRole))
+        {
+            return Forbid();
+        }
+
+        var user = _userManager.GetUserById(effectiveUserId);
+        if (user is null)
+        {
+            _logger.LogWarning("[Roulette][WARN] User not found: {UserId}", effectiveUserId);
             return BadRequest("Invalid user ID");
         }
 
-        // Get the playlist
-        var playlist = _libraryManager.GetItemById(playlistId) as Playlist;
-        if (playlist == null)
+        var playlist = _playlistManager.GetPlaylistForUser(playlistId, effectiveUserId);
+        if (playlist is null)
         {
-            _logger.LogWarning("Playlist not found: {PlaylistId}", playlistId);
             return NotFound("Playlist not found");
         }
 
-        _logger.LogInformation("Found playlist: {PlaylistName}", playlist.Name);
+        // Same access rules as Jellyfin's own GET /Playlists/{id}/Items.
+        var isPermitted = playlist.OpenAccess
+            || playlist.OwnerUserId.Equals(effectiveUserId)
+            || playlist.Shares.Any(s => s.UserId.Equals(effectiveUserId));
+        if (!isPermitted)
+        {
+            return Forbid();
+        }
 
-        // Get playlist items
-        var items = playlist.GetChildren(user, true)
-            .Where(item => item != null && !item.IsPlayed(user))
+        // GetManageableItems returns the playlist entries themselves (movies, episodes, audio, videos)
+        // regardless of item type, unlike a ParentId query filtered to movies.
+        var unwatched = playlist.GetManageableItems()
+            .Select(entry => entry.Item2)
+            .Where(item => item is not null && !item.IsFolder && item.IsVisible(user) && !item.IsPlayed(user, null))
             .ToList();
 
-        _logger.LogInformation("Found {Count} unwatched items in playlist", items.Count);
-
-        if (items.Count == 0)
+        if (unwatched.Count == 0)
         {
-            _logger.LogInformation("No unwatched items found in playlist: {PlaylistId}", playlistId);
             return NotFound("No unwatched items found in playlist");
         }
 
-        // Select a random item
-        var random = new Random();
-        var randomIndex = random.Next(items.Count);
-        var selectedItem = items[randomIndex];
+        var selectedItem = unwatched[Random.Shared.Next(unwatched.Count)];
 
-        _logger.LogInformation(
-            "Selected random item: {ItemName} (ID: {ItemId}) from {TotalCount} unwatched items",
+        _logger.LogDebug(
+            "[Roulette][DEBUG] Selected {ItemName} ({ItemId}) from {Count} unwatched items in playlist {PlaylistId}",
             selectedItem.Name,
             selectedItem.Id,
-            items.Count);
+            unwatched.Count,
+            playlistId);
 
-        // Convert to DTO for proper serialization
-        var dtoOptions = new DtoOptions();
-        var itemDto = _dtoService.GetBaseItemDto(selectedItem, dtoOptions, user);
+        return Ok(_dtoService.GetBaseItemDto(selectedItem, new DtoOptions(), user));
+    }
 
-        _logger.LogInformation("Returning DTO with Name: {Name}, Id: {Id}", itemDto.Name, itemDto.Id);
-
-        return Ok(itemDto);
+    private Guid GetCallerUserId()
+    {
+        var value = User.FindFirst(UserIdClaim)?.Value;
+        return Guid.TryParse(value, CultureInfo.InvariantCulture, out var id) ? id : Guid.Empty;
     }
 }
